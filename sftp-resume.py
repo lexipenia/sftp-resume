@@ -24,33 +24,67 @@ def main():
     global targetDir 
     targetDir = input("Drag and drop to select target local directory:\n").replace("\\", "").strip()
 
+    global remoteDir # allow us to change this when navigating
+
+    print("Connecting to the server…")
+
     with createSFTPClient(myHostname, myPort, myUsername, myPassword) as sftp:
 
-        print ("Connection established successfully.")                      # connect + get dir list
+        print("Connection established successfully.")
         sftp.chdir(remoteDir)
-        directory_structure = sftp.listdir_attr()
-        directory_structure.sort(key = lambda x: x.st_mtime, reverse=True)  # sort by date, newest first
-        for x in reversed(directory_structure):                             
-            print(directory_structure.index(x),"|",getSize(x),"|", x.filename)
 
-        # collect names of the root files/folders to download
-        root_folders = [] 
-        indices = input("Enter directories to download separated by comma, e.g. \"1,3,5\":\n").split(",")
-        for index in indices:
-            root_folders.append(directory_structure[int(index)].filename)
+        # select the base directory we want to download from, then select files; repeat loop on error
+        while(True):
 
-        # get all the required info on each file
-        print("Adding files to download queue…")
-        all_files = []
-        for item in root_folders:
-            getFileInfo(item,"",all_files,sftp)  # empty base path + sftp client must be passed on
+            directory_structure = sftp.listdir_attr()
+            directory_structure.sort(key = lambda x: x.st_mtime, reverse=True)  # sort by date, newest first
+            for x in reversed(directory_structure):                             
+                print(directory_structure.index(x),"|",getSize(x),"|", x.filename)
+
+            print("\nCurrent directory:",remoteDir)
+
+            nav_choice = input("\nType \"cd\" and a directory number (or ..) to change directory or enter files to download separated by comma, e.g. \"cd 12\", \"cd ..\" or \"1,3,5\".\n")
+
+            if nav_choice[:3] == "cd ":
+                try:
+                    if nav_choice == "cd ..":
+                        sftp.chdir("..")
+                        remoteDir = sftp.getcwd()   # we must reset this so the "download" function picks it up
+                    else:
+                        index = int(nav_choice[3:])
+                        sftp.chdir(directory_structure[index].filename)
+                        remoteDir = sftp.getcwd()    
+                except Exception as e:
+                    print("Input error:\n", str(e))
+                    print("Let’s try again in 5 seconds…")
+                    sleep(5)
+                    continue
+            else:
+                try:
+                    # collect names of the root files/folders to download
+                    root_folders = [] 
+                    indices = nav_choice.split(",")
+                    for index in indices:
+                        root_folders.append(directory_structure[int(index)].filename)
+
+                    # get all the required info on each file for the download function
+                    print("Adding files to download queue…")
+                    all_files = []
+                    for item in root_folders:
+                        getFileInfo(item,"",all_files,sftp)  # pass on empty base path + sftp client
+                    break
+                except Exception as e:
+                    print("Input error:\n", str(e))
+                    print("Let’s try again in 5 seconds…")
+                    sleep(5)
+                    continue
 
         # if connection breaks keep trying until we have all the files!
-        finished = False
-        while(finished == False):
+        while(True):
             try:
                 download(all_files)
-                finished = True
+                print("All downloads finished.")
+                exit()
             except Exception as e:
                 if str(e).strip() == "Server connection dropped:":
                     print("Connection error occurred. Retrying in 10 seconds…")
@@ -59,8 +93,6 @@ def main():
                     print("An error occurred:\n" + str(e))
                     print("Quitting…")
                     exit()
-
-        print("All downloads finished.")
 
 # create a paramiko SFTP client
 def createSFTPClient(host, port, username, password):
@@ -128,9 +160,11 @@ def download(file_list):
         "speed_series": deque([],maxlen=40),     # store the last 40 speeds to give 20 sec smoother average
     }
 
+    print("Connecting to the server to download files…")
+
     with createSFTPClient(myHostname, myPort, myUsername, myPassword) as sftp:
 
-        print("Connection established to download files.")
+        print("Connection established successfully.")
         sftp.chdir(remoteDir)
 
         # set up the progress bar here and pass it into the callback function
