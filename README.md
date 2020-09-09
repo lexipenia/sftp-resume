@@ -21,5 +21,5 @@ The target directory for downloads is normally set at the beginning by dragging/
 Simply run the program from the command line:
 
 ```
-python sftp-resume.py
+$ python sftp-resume.py
 ```
