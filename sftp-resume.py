@@ -207,7 +207,7 @@ def downloadLoop():
         current_file = download_current_file.value
         current_size = os.stat(current_file).st_size
 
-        # if file hasn't changed, kill the process
+        # if file hasn't changed, kill the process and start a new one
         if last_file == current_file and last_size == current_size:       
             p.terminate()
             p.join()
