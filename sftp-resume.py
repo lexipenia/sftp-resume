@@ -190,11 +190,12 @@ def downloadLoop():
     manager = Manager()
     download_status = manager.Value("i", 1)
     download_current_file = manager.Value(c_char_p, "")
-    p = Process(target=download, args=[download_status,download_current_file])
+    download_file_exists = manager.Value("i", 0)
+    p = Process(target=download, args=[download_status,download_current_file,download_file_exists])
     p.start()
 
-    # wait for a first file to be fetched
-    while(download_current_file.value == ""):
+    # wait for a first file to be created before continuing
+    while not bool(download_file_exists.value):
         sleep(1)
 
     last_file = download_current_file.value
@@ -211,7 +212,7 @@ def downloadLoop():
             p.terminate()
             p.join()
             print("Connection error. Restarting download…")
-            p = Process(target=download, args=[download_status,download_current_file])
+            p = Process(target=download, args=[download_status,download_current_file,download_file_exists])
             p.start()
 
         # update last file info before looping again
@@ -221,7 +222,7 @@ def downloadLoop():
     exit(0)
         
 # download all the files in the list, creating a new SFTP client each time the function runs
-def download(status,current_file):
+def download(status,current_file,file_exists):
 
     # track progress: make these properties global to manipulate with the callback function
     global progress
@@ -263,6 +264,9 @@ def download(status,current_file):
                         os.makedirs(os.path.dirname(local_path), exist_ok=True)
                         local_size = 0
                     
+                    # allow main loop to continue once we are sure a file exists
+                    file_exists.value = 1
+
                     remote_size = sftp.stat(item.path).st_size
 
                     # download missing material (if it already exists, progress stats are updated above anyway)
