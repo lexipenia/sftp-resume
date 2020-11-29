@@ -1,4 +1,6 @@
 import os
+from multiprocessing import Process, Manager
+from ctypes import c_char_p
 from time import sleep, time
 from datetime import timedelta
 from collections import deque
@@ -15,7 +17,7 @@ class File:
         self.name = a
         self.path = b
         self.size = c
-    def __eq__(self, other):                        # control for items already in queue
+    def __eq__(self, other):                   # control for items already in queue
         return self.__dict__ == other.__dict__
 
 # main function: connect and then select the files to download
@@ -29,6 +31,7 @@ def main():
     print("Connecting to the server…")
 
     # collect downloads + any notifications/errors
+    global downloads_list
     downloads_list = []
     added = ""
     error = ""
@@ -72,7 +75,7 @@ def main():
                 error = ""
 
             # process the user's input
-            nav_choice = input("\n\"cd\": change directory. \"add\": add to download queue. \"clear\": clear queue. \"dl\": start downloading.\nExample commands: \"cd 12\", \"cd ..\", \"add 2\", \"add 1,3,5\", \"add all\", \"dl\".\n")
+            nav_choice = input("\n\"cd\": change directory. \"add\": add to download queue. \"clear\": clear queue. \"dl\": start downloading.\nExample commands: \"cd 12\", \"cd ..\", \"add 2\", \"add 1,3,5\", \"add all\", \"dl\", \"exit\".\n")
 
             try:
 
@@ -85,7 +88,7 @@ def main():
 
                 elif nav_choice[:4] == "add ":                   # add files to list
                     root_folders = [] 
-                    if nav_choice == "add all":
+                    if nav_choice.strip() == "add all":
                         indices = range(0,len(directory_structure))
                     else:
                         indices = nav_choice[4:].split(",")
@@ -98,13 +101,16 @@ def main():
                         print(item)
                         getFileInfo(item,"",downloads_list,sftp)  # pass on empty base path + sftp client                        
 
-                elif nav_choice == "clear":                       # clear downloads
+                elif nav_choice.strip() == "clear":               # clear downloads
                     print("Clearing downloads list…")
                     downloads_list = []
                     sleep(1)
 
-                elif nav_choice[:2] == "dl":                      # initiate downloads
+                elif nav_choice.strip() == "dl":                  # initiate downloads
                     break
+
+                elif nav_choice.strip() == "exit":                # quit
+                    exit(0)
 
                 else:
                     error = "\nCommand not recognized: \"" + nav_choice + "\""
@@ -112,21 +118,9 @@ def main():
             except Exception as e:
                 error = "\nError during input: " + str(e)
                 continue
-
-        # if connection breaks keep trying until we have all the files!
-        while(True):
-            try:
-                download(downloads_list)
-                print("All downloads finished.")
-                exit(0)
-            except Exception as e:
-                if str(e).strip() == "Server connection dropped:":
-                    print("Connection error occurred. Retrying in 10 seconds…")
-                    sleep(10)
-                else:
-                    print("An error occurred:\n" + str(e))
-                    print("Quitting…")
-                    exit(1)
+        
+        # initiate downloads
+        downloadLoop()
 
 # create a paramiko SFTP client
 def createSFTPClient(host, port, username, password):
@@ -187,14 +181,52 @@ def addFileToList(filename,file_path,target_list,sftp_client):
             break
     else:
         target_list.append(new_file)
+
+# create a new process for downloading files; loop to check download progress
+# if progress is stalled, kill the process and restart downloads
+def downloadLoop():
+
+    # store variables modified by the process here + pass in as args when creating it
+    manager = Manager()
+    download_status = manager.Value("i", 1)
+    download_current_file = manager.Value(c_char_p, "")
+    p = Process(target=download, args=[download_status,download_current_file])
+    p.start()
+
+    # wait for a first file to be fetched
+    while(download_current_file.value == ""):
+        sleep(1)
+
+    last_file = download_current_file.value
+    last_size = os.stat(last_file).st_size
+    
+    while bool(download_status.value):
+        
+        sleep(5)
+        current_file = download_current_file.value
+        current_size = os.stat(current_file).st_size
+
+        # if file hasn't changed, kill the process
+        if last_file == current_file and last_size == current_size:       
+            p.terminate()
+            p.join()
+            print("Connection error. Restarting download…")
+            p = Process(target=download, args=[download_status,download_current_file])
+            p.start()
+
+        # update last file info before looping again
+        last_file = current_file
+        last_size = current_size
+    
+    exit(0)
         
 # download all the files in the list, creating a new SFTP client each time the function runs
-def download(file_list):
+def download(status,current_file):
 
     # track progress: make these properties global to manipulate with the callback function
     global progress
     progress = {
-        "total_size": sum(x.size for x in file_list),
+        "total_size": sum(x.size for x in downloads_list),  # get values from main unmodified list
         "last_file_total": 0,
         "total_down": 0,
         "last_time": 0,
@@ -203,42 +235,51 @@ def download(file_list):
 
     print("Connecting to the server to download files…")
 
-    with createSFTPClient(myHostname, myPort, myUsername, myPassword) as sftp:
+    # if paramiko produces an error, just return and let the loop execute again
+    try:
+        with createSFTPClient(myHostname, myPort, myUsername, myPassword) as sftp:
 
-        print("Connection established successfully.")
+            print("Connection established successfully.")
 
-        # set up the progress bar here and pass it into the callback function
-        with alive_bar(int(progress["total_size"]/1000000), bar = "smooth", spinner = "pointer", manual=True) as bar:
+            # set up the progress bar here and pass it into the callback function
+            with alive_bar(int(progress["total_size"]/1000000), bar = "smooth", spinner = "pointer", manual=True) as bar:
+        
+                current_item_number = 0
+
+                for item in downloads_list:
             
-            current_item_number = 0
+                    current_item_number += 1            # update stats
+                    progress["last_file_total"] = 0
+                    print("Downloading {} of {} | {} | {}".format(current_item_number,len(downloads_list),tidySize(item.size),item.name))
+                    
+                    local_path = targetDir + tidyPath(item.path)
+                    current_file.value = local_path # modify shared value for checking progress
 
-            for item in file_list:
-           
-                current_item_number += 1            # update stats
-                progress["last_file_total"] = 0
-                print("Downloading {} of {} | {} | {}".format(current_item_number,len(file_list),tidySize(item.size),item.name))
-                
-                local_path = targetDir + tidyPath(item.path)
+                    # get local size if file exists; if it doesn't, create directories + download         
+                    if os.path.isfile(local_path):                   
+                        local_size = os.stat(local_path).st_size
+                        progress["total_down"] += local_size     # count already downloaded chunks
+                    else:
+                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                        local_size = 0
+                    
+                    remote_size = sftp.stat(item.path).st_size
 
-                # get local size if file exists; if it doesn't, create directories + download         
-                if os.path.isfile(local_path):                   
-                    local_size = os.stat(local_path).st_size
-                    progress["total_down"] += local_size     # count already downloaded chunks
-                else:
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    local_size = 0
-                
-                remote_size = sftp.stat(item.path).st_size
+                    # download missing material (if it already exists, progress stats are updated above anyway)
+                    if local_size < remote_size:
+                        with open(local_path, "ab") as local_file, sftp.open(item.path, "rb") as remote_file:
+                            if local_size > 0:
+                                remote_file.seek(local_size)
+                            remote_file.prefetch(remote_size)
+                            sftp._transfer_with_callback(reader=remote_file, writer=local_file, file_size=remote_size, callback=lambda x,y: updateProgress(x,bar))
+                    
+                bar(1)    # make sure bar ends on 100% if we have iterated over whole list
+    except:
+        return
 
-                # download missing material (if it already exists, progress stats are updated above anyway)
-                if local_size < remote_size:
-                    with open(local_path, "ab") as local_file, sftp.open(item.path, "rb") as remote_file:
-                        if local_size > 0:
-                            remote_file.seek(local_size)
-                        remote_file.prefetch(remote_size)
-                        sftp._transfer_with_callback(reader=remote_file, writer=local_file, file_size=remote_size, callback=lambda x,y: updateProgress(x,bar))
-                
-            bar(1)    # make sure bar ends on 100% if we have iterated over whole list
+    # if all downloads actually finished, modify shared value to break loop
+    status.value = 0
+    print("All downloads finished.")
 
 # remove the unwanted parts of the remoteDir path 
 def tidyPath(remote_path):
