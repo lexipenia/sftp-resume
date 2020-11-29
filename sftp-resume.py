@@ -190,12 +190,11 @@ def downloadLoop():
     manager = Manager()
     download_status = manager.Value("i", 1)
     download_current_file = manager.Value(c_char_p, "")
-    download_file_exists = manager.Value("i", 0)
-    p = Process(target=download, args=[download_status,download_current_file,download_file_exists])
+    p = Process(target=download, args=[download_status,download_current_file])
     p.start()
 
     # wait for a first file to be created before continuing
-    while not bool(download_file_exists.value):
+    while download_current_file.value == "":
         sleep(1)
 
     last_file = download_current_file.value
@@ -212,7 +211,7 @@ def downloadLoop():
             p.terminate()
             p.join()
             print("Connection error. Restarting download…")
-            p = Process(target=download, args=[download_status,download_current_file,download_file_exists])
+            p = Process(target=download, args=[download_status,download_current_file])
             p.start()
 
         # update last file info before looping again
@@ -222,7 +221,7 @@ def downloadLoop():
     exit(0)
         
 # download all the files in the list, creating a new SFTP client each time the function runs
-def download(status,current_file,file_exists):
+def download(status,current_file):
 
     # track progress: make these properties global to manipulate with the callback function
     global progress
@@ -254,7 +253,6 @@ def download(status,current_file,file_exists):
                     print("Downloading {} of {} | {} | {}".format(current_item_number,len(downloads_list),tidySize(item.size),item.name))
                     
                     local_path = targetDir + tidyPath(item.path)
-                    current_file.value = local_path # modify shared value for checking progress
 
                     # get local size if file exists; if it doesn't, create directories + download         
                     if os.path.isfile(local_path):                   
@@ -264,8 +262,8 @@ def download(status,current_file,file_exists):
                         os.makedirs(os.path.dirname(local_path), exist_ok=True)
                         local_size = 0
                     
-                    # allow main loop to continue once we are sure a file exists
-                    file_exists.value = 1
+                    # allow main loop to continue once we are sure a file exists + only update path when it exists
+                    current_file.value = local_path
 
                     remote_size = sftp.stat(item.path).st_size
 
@@ -278,7 +276,9 @@ def download(status,current_file,file_exists):
                             sftp._transfer_with_callback(reader=remote_file, writer=local_file, file_size=remote_size, callback=lambda x,y: updateProgress(x,bar))
                     
                 bar(1)    # make sure bar ends on 100% if we have iterated over whole list
-    except:
+    
+    except Exception as e:
+        print(e)
         return
 
     # if all downloads actually finished, modify shared value to break loop
