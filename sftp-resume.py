@@ -24,10 +24,8 @@ class File:
 def main():
 
     # remove these two lines if specifying targetDir from config
-    """
     global targetDir
     targetDir = input("Drag and drop to select target local directory:\n").replace("\\", "").strip()
-    """
     
     print("Connecting to the server…")
 
