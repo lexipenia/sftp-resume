@@ -21,7 +21,7 @@ class File:
 
 # main function: connect and then select the files to download
 # actual downloads create a new SFTP connection in order to resume on break
-def main():
+def run():
 
     # remove these two lines if specifying targetDir from config
     global targetDir
@@ -117,7 +117,7 @@ def main():
             except Exception as e:
                 error = "\nError during input: " + str(e)
                 continue
-        
+
         # initiate downloads
         downloadLoop()
 
@@ -188,7 +188,10 @@ def downloadLoop():
     # store variables modified by the process here + pass as args when creating it
     manager = Manager()
     resume_downloads_list = manager.list(downloads_list)        # remove items here so as not to repeat on resume
-    progress = manager.dict({
+    variables = manager.dict({
+        "total_files": len(downloads_list),
+        "targetDir": targetDir,
+        "remoteDirFull": remoteDirFull,
         "downloading": True,
         "file_start": False,       # track restart status for adding size of existing files properly
         "restart_size": 0,
@@ -199,29 +202,29 @@ def downloadLoop():
         "last_file_total": 0,
         "total_down": 0,
         "last_time": 0,
-        "speed_series": [],     # store the last 40 speeds to give 20 sec smoother average
+        "speed_series": []         # store the last 40 speeds to give 20 sec smoother average
     })
 
-    p = Process(target=download, args=[resume_downloads_list,progress])
+    p = Process(target=download, args=[resume_downloads_list,variables])
     p.start()
 
     # wait for a first file to be created before continuing
-    while progress["current_file"] == "":
-        if progress["total_down"] == progress["total_size"]:    # exception for case when run on completed folder
+    while variables["current_file"] == "":
+        if variables["total_down"] == variables["total_size"]:    # exception for case when run on completed folder
             p.terminate()
             p.join()
             print("All downloads finished.")
             exit(0)
         sleep(1)
 
-    last_file = progress["current_file"]
+    last_file = variables["current_file"]
     last_size = os.stat(last_file).st_size
     
     # check status every 5 seconds, see if we have to restart the download thread
-    while progress["downloading"]:
+    while variables["downloading"]:
         
         sleep(5)
-        current_file = progress["current_file"]
+        current_file = variables["current_file"]
         current_size = os.stat(current_file).st_size
 
         # if file hasn't changed, kill the process and start a new one
@@ -229,8 +232,8 @@ def downloadLoop():
             p.terminate()
             p.join()
             print("Connection error. Restarting download…")
-            progress["first_run"] = False
-            p = Process(target=download, args=[resume_downloads_list, progress])
+            variables["first_run"] = False
+            p = Process(target=download, args=[resume_downloads_list, variables])
             p.start()
 
         # update last file info before looping again
@@ -244,7 +247,7 @@ def downloadLoop():
     exit(0)
     
 # download all the files in the list, creating a new SFTP client each time the function runs
-def download(resume_downloads_list,progress):
+def download(resume_downloads_list,variables):
 
     print("Connecting to the server to download files…")
 
@@ -255,14 +258,14 @@ def download(resume_downloads_list,progress):
             print("Connection established successfully.")
 
             # set up the progress bar here and pass it into the callback function
-            with alive_bar(int(progress["total_size"]/1000000), bar = "smooth", spinner = "pointer", manual=True) as bar:
+            with alive_bar(int(variables["total_size"]/1000000), bar = "smooth", spinner = "pointer", manual=True) as bar:
 
                 iterate_list = deepcopy(resume_downloads_list)      # so as not to modify the list we are iterating
                 for item in iterate_list:
             
-                    print("Downloading {} of {} | {} | {}".format(progress["current_item"],len(downloads_list),tidySize(item.size),item.name))
+                    print("Downloading {} of {} | {} | {}".format(variables["current_item"],variables["total_files"],tidySize(item.size),item.name))
                     
-                    local_path = targetDir + tidyPath(item.path)
+                    local_path = variables["targetDir"] + tidyPath(item.path,variables["remoteDirFull"])
 
                     # get local size if file exists; if it doesn't, create directories + download         
                     if os.path.isfile(local_path):                   
@@ -275,45 +278,45 @@ def download(resume_downloads_list,progress):
 
                     # download missing material; update flag for when a file is (re)starting + set size
                     if local_size < remote_size:
-                        if progress["first_run"]:
-                            progress["total_down"] += local_size
-                        progress["file_start"] = True
-                        progress["last_file_total"] = local_size
+                        if variables["first_run"]:
+                            variables["total_down"] += local_size
+                        variables["file_start"] = True
+                        variables["last_file_total"] = local_size
                         with open(local_path, "ab") as local_file, sftp.open(item.path, "rb") as remote_file:
                             if local_size > 0:
                                 remote_file.seek(local_size)
                             remote_file.prefetch(remote_size)
-                            sftp._transfer_with_callback(reader=remote_file, writer=local_file, file_size=remote_size, callback=lambda x,y: updateProgress(x,bar,progress,local_path))
+                            sftp._transfer_with_callback(reader=remote_file, writer=local_file, file_size=remote_size, callback=lambda x,y: updateProgress(x,bar,variables,local_path))
                     
                     # if files already exist on first run of script, add them to the total
                     # this will not trigger in context of restart since they will not be in queue
                     # and their sizes will already have been counted
                     else:
-                        progress["total_down"] += local_size
+                        variables["total_down"] += local_size
                     
                     # when a download finishes, remove from resume list and update counter
                     resume_downloads_list.remove(item)
-                    progress["current_item"] += 1
+                    variables["current_item"] += 1
                     
                 # when all downloads have finished, make sure bar ends on 100% + change variable to break main loop
                 bar(1)
-                progress["downloading"] = False
+                variables["downloading"] = False
     
     except Exception as e:
         print(e)
         return
 
 # remove the unwanted parts of the remoteDir path 
-def tidyPath(remote_path):
+def tidyPath(remote_path,main_remote_dir):
 
     diff = False
-    for i in range(0,len(remoteDirFull)):
-        if remoteDirFull[i] != remote_path[i]:
+    for i in range(0,len(main_remote_dir)):
+        if main_remote_dir[i] != remote_path[i]:
             cut = i
             diff = True
             break
     if diff == False:               # catch the case where the whole string is contained
-        cut = len(remoteDirFull)    # NB. these will contain "/", others won't
+        cut = len(main_remote_dir)    # NB. these will contain "/", others won't
 
     if cut == 0:                    # find the first relevant "/" in the string
         return remote_path
@@ -327,38 +330,38 @@ def tidyPath(remote_path):
         return remote_path[dir_begin:]
 
 # update the progress bar and track our total progress
-def updateProgress(x,bar,progress,local_path):
+def updateProgress(x,bar,variables,local_path):
     
-    time_change = time() - progress["last_time"]
+    time_change = time() - variables["last_time"]
 
     if time_change > 0.5:  # update the bar every 0.5 seconds
 
-        progress["last_time"] = time()
+        variables["last_time"] = time()
     
         # calculate the progress
-        if progress["file_start"]:
+        if variables["file_start"]:
             # allow main loop to initiate once we are sure a file has been created (when some data has been fetched)
-            progress["current_file"] = local_path
-            progress["restart_size"] = progress["last_file_total"]  # on first fetch, set restart point (will be 0 if new)
-            progress["file_start"] = False
+            variables["current_file"] = local_path
+            variables["restart_size"] = variables["last_file_total"]  # on first fetch, set restart point (will be 0 if new)
+            variables["file_start"] = False
 
-        data_change = x + progress["restart_size"] - progress["last_file_total"]
-        progress["last_file_total"] = x + progress["restart_size"]
-        progress["total_down"] += data_change
-        percent = progress["total_down"]/progress["total_size"]
+        data_change = x + variables["restart_size"] - variables["last_file_total"]
+        variables["last_file_total"] = x + variables["restart_size"]
+        variables["total_down"] += data_change
+        percent = variables["total_down"]/variables["total_size"]
 
         # calculate the momentary stats for speed/eta: unreliable when new files load, so need to average speeds
         # alive_progress ETA is inaccurate for restarted downloads, so we need to add our own
         speed = data_change/time_change
 
         # create our own deque here; manipulate + reassign to the Manager.dict object to make sure it updates
-        speed_series = progress["speed_series"]
+        speed_series = variables["speed_series"]
         if len(speed_series) > 40:
             speed_series = speed_series[1:]
         speed_series.append(speed)
-        progress["speed_series"] = speed_series
-        speed_average = mean(progress["speed_series"])
-        eta_seconds = (progress["total_size"] - progress["total_down"])/speed_average
+        variables["speed_series"] = speed_series
+        speed_average = mean(variables["speed_series"])
+        eta_seconds = (variables["total_size"] - variables["total_down"])/speed_average
 
         # hide extreme speed / eta
         if speed_average < 1000:    # 1 kb/s
@@ -371,9 +374,10 @@ def updateProgress(x,bar,progress,local_path):
         else:
             display_eta = timedelta(seconds=int(eta_seconds))
 
-        message = "{} / {} | {}/s | ETA: {}".format(tidySize(progress["total_down"]),tidySize(progress["total_size"]),display_speed,display_eta)
+        message = "{} / {} | {}/s | ETA: {}".format(tidySize(variables["total_down"]),tidySize(variables["total_size"]),display_speed,display_eta)
         bar.text(message)
         bar(percent)
 
-# run the program
-main()
+# run the program; protect multiprocessing
+if __name__ == '__main__':
+    run()
